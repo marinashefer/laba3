@@ -67,7 +67,7 @@ int main() {
     cl_context context;
     cl_command_queue queue;
     cl_program program;
-    cl_kernel kernel_det;
+    cl_kernel kernel_det, kernel_md5;
 
     err = clGetPlatformIDs(1, &platform, NULL);
     err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
@@ -84,6 +84,7 @@ int main() {
         return 1;
     }
     kernel_det = clCreateKernel(program, "det_leibniz", &err);
+    kernel_md5 = clCreateKernel(program, "md5_bruteforce", &err);
     free(kernel_source);
 
     printf("OpenCL initialized successfully on AMD GPU!\n\n");
@@ -146,11 +147,64 @@ int main() {
     }
 
     // задача 2: брутфорс MD5
+    
+    const char* charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+    int charset_len = 36, max_len = 4;
+    const char* target_hex = "098f6bcd4621d373cade4e832627b4f6";
 
-    // очистка
+    unsigned char target_digest[16];
+    for (int i = 0; i < 16; i++) {
+        unsigned int val;
+        sscanf(target_hex + i*2, "%2x", &val);
+        target_digest[i] = (unsigned char)val;
+    }
+
+    long long total_combs = 0, powers = 1;
+    for (int l = 1; l <= max_len; l++) { powers *= charset_len; total_combs += powers; }
+
+    cl_mem d_target = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                     16, target_digest, &err);
+    cl_mem d_charset = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      charset_len, (void*)charset, &err);
+    cl_int h_found_flag = 0;
+    cl_mem d_found_flag = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(cl_int), &h_found_flag, &err);
+    char h_found_str[16] = {0};
+    cl_mem d_found_str = clCreateBuffer(context, CL_MEM_WRITE_ONLY, 16, NULL, &err);
+
+    clSetKernelArg(kernel_md5, 0, sizeof(cl_mem), &d_target);
+    clSetKernelArg(kernel_md5, 1, sizeof(cl_mem), &d_charset);
+    clSetKernelArg(kernel_md5, 2, sizeof(cl_int), &charset_len);
+    clSetKernelArg(kernel_md5, 3, sizeof(cl_int), &max_len);
+    clSetKernelArg(kernel_md5, 4, sizeof(cl_mem), &d_found_flag);
+    clSetKernelArg(kernel_md5, 5, sizeof(cl_mem), &d_found_str);
+
+    size_t global_size_md5 = total_combs;
+    clock_t start_md5 = clock();
+    clEnqueueNDRangeKernel(queue, kernel_md5, 1, NULL, &global_size_md5, NULL, 0, NULL, NULL);
+    clFinish(queue);
+    clock_t end_md5 = clock();
+
+    clEnqueueReadBuffer(queue, d_found_flag, CL_TRUE, 0,
+                        sizeof(cl_int), &h_found_flag, 0, NULL, NULL);
+    if (h_found_flag) {
+        clEnqueueReadBuffer(queue, d_found_str, CL_TRUE, 0, 16, h_found_str, 0, NULL, NULL);
+        printf("[GPU MD5] нашел: '%s' за %f сек\n",
+               h_found_str, (double)(end_md5 - start_md5) / CLOCKS_PER_SEC);
+    } else {
+        printf("[GPU MD5] не нашел за %f сек\n",
+               (double)(end_md5 - start_md5) / CLOCKS_PER_SEC);
+    }
+
+    // Очистка памяти
     clReleaseMemObject(d_A);
     clReleaseMemObject(d_results);
+    clReleaseMemObject(d_target);
+    clReleaseMemObject(d_charset);
+    clReleaseMemObject(d_found_flag);
+    clReleaseMemObject(d_found_str);
     clReleaseKernel(kernel_det);
+    clReleaseKernel(kernel_md5);
     clReleaseProgram(program);
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
